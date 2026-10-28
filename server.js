@@ -5,7 +5,7 @@ const verifyCleanup = require('./api/verify-cleanup.js');
 const chat = require('./api/chat.js');
 
 const app = express();
-const port = 49879;
+const port = Number(process.env.PORT) || 49879;
 
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "SweepX — Clean it. Earn it.",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.0.0",
     "body-parser": "^2.2.2",
