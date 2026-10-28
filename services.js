@@ -1,385 +1,182 @@
-/* ── SweepX Services Layer ──
-   All Supabase calls go here. app.js never calls _sb directly.
-──────────────────────────────────────────────────────── */
+/* SweepX demo services.
+   This browser-only data layer keeps the demonstration independent of Supabase.
+   Data exists for the current page session only; no credentials or user data are persisted. */
 
-/* ─── Pre-validation AI ─── */
-async function validateBeforeImage(imageUrl) {
-  const res = await fetch('/api/verify-cleanup', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ mode: 'before', before_image_url: imageUrl })
-  });
+const DEMO_IMAGE = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" viewBox="0 0 900 600">
+    <rect width="900" height="600" fill="#172217"/><circle cx="160" cy="130" r="95" fill="#314d2c"/>
+    <path d="M0 470 Q250 350 470 460 T900 410 V600 H0Z" fill="#243d28"/>
+    <text x="450" y="290" text-anchor="middle" fill="#7CFF3B" font-family="Arial" font-size="32" font-weight="700">SWEEPX DEMO</text>
+    <text x="450" y="335" text-anchor="middle" fill="#fff" opacity=".7" font-family="Arial" font-size="18">Community cleanup mission</text>
+  </svg>`
+);
 
-  let data;
-  try { data = await res.json(); } catch { return { has_garbage: true, skipped: true }; }
-  if (!res.ok) return { has_garbage: true, skipped: true, error: data?.error };
-  return data;
+const demoState = {
+  users: [
+    { id: 'demo-kai', username: 'kai_cleans', display_name: 'kai_cleans', points: 1240, level: 3, streak: 12, missions_completed: 8, reports_submitted: 6 },
+    { id: 'demo-priya', username: 'priya_eco', display_name: 'priya_eco', points: 890, level: 2, streak: 7, missions_completed: 5, reports_submitted: 4 },
+    { id: 'demo-tnguyen', username: 'tnguyen', display_name: 'tnguyen', points: 640, level: 2, streak: 3, missions_completed: 4, reports_submitted: 3 }
+  ],
+  missions: []
+};
+
+function demoId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+function demoAgo(minutes) {
+  return new Date(Date.now() - minutes * 60 * 1000).toISOString();
+}
+function demoUser(id) {
+  return demoState.users.find(user => user.id === id) || null;
+}
+function createDemoMission(location, description, status, creatorId, minutesAgo, acceptedBy) {
+  const reportId = demoId('report');
+  const mission = {
+    id: demoId('mission'), report_id: reportId, status, verification_status: status === 'approved' ? 'approved' : null,
+    created_at: demoAgo(minutesAgo), completed_at: status === 'approved' ? demoAgo(minutesAgo - 60) : null,
+    points_reward: 150, accepted_by: acceptedBy || null, before_image: DEMO_IMAGE, after_image: null,
+    report: { id: reportId, image_url: DEMO_IMAGE, location, description, created_at: demoAgo(minutesAgo), user_id: creatorId,
+      reporter: demoUser(creatorId) },
+    acceptor: acceptedBy ? demoUser(acceptedBy) : null
+  };
+  demoState.missions.push(mission);
 }
 
-/* ─── Human-friendly error map ─── */
-function _friendlyError(err, fallback) {
-  if (!err) return fallback;
-  const msg = (err.message || '').toLowerCase();
-  if (msg.includes('network') || msg.includes('fetch')) return 'No connection. Check your internet and try again.';
-  if (msg.includes('upload') || msg.includes('storage')) return "Couldn't upload your photo. Check your connection and try again.";
-  if (msg.includes('already accepted') || msg.includes('in_progress')) return 'This mission was just claimed by someone else.';
-  if (msg.includes('duplicate') || msg.includes('unique')) return 'That username is already taken.';
-  return fallback || 'Something went wrong. Please try again.';
-}
+[
+  ['Sector 17 Park, near the east gate', 'Plastic bags and water bottles scattered near the park bench.', 'open', 'demo-kai', 14],
+  ['MG Road footpath, outside Metro exit 3', 'Mixed waste including food containers and packaging.', 'in_progress', 'demo-priya', 60, 'demo-tnguyen'],
+  ['Lajpat Nagar market, behind the vegetable stalls', 'Old crates, vegetable scraps, and plastic wrapping near the drain.', 'approved', 'demo-tnguyen', 180],
+  ['Nehru Place parking lot B, northwest corner', 'A broken office chair and paper waste in the lot.', 'open', 'demo-priya', 28],
+  ['Saket metro station bus stand', 'Fast-food wrappers and cups around the bus shelter.', 'open', 'demo-kai', 2]
+].forEach(item => createDemoMission(...item));
 
-/* ─── Storage: upload file, return public URL ─── */
-async function uploadImage(file, bucket) {
-  bucket = bucket || 'report-images';
-  const ext = (file.name || 'img').split('.').pop();
-  const filename = Date.now() + '-' + Math.random().toString(36).slice(2) + '.' + ext;
-  const { error } = await _sb.storage.from(bucket).upload(filename, file, {
-    cacheControl: '3600', upsert: false, contentType: file.type
-  });
-  if (error) throw new Error('upload_failed: ' + error.message);
-  const { data } = _sb.storage.from(bucket).getPublicUrl(filename);
-  return data.publicUrl;
-}
-
-/* ─── Profiles ─── */
-async function getOrCreateProfile(username) {
-  username = username.trim();
-  const { data: existing } = await _sb.from('profiles')
-    .select('*').eq('username', username).maybeSingle();
-  if (existing) return existing;
-  const { data, error } = await _sb.from('profiles')
-    .insert({ username, display_name: username })
-    .select().single();
-  if (error) throw new Error(_friendlyError(error, "Couldn't create profile."));
-  return data;
-}
-
-async function getProfile(userId) {
-  const { data, error } = await _sb.from('profiles')
-    .select('*, missions:missions(id, status, created_at, report:reports(location, image_url))')
-    .eq('id', userId).single();
-  if (error) throw new Error(_friendlyError(error, "Couldn't load profile."));
-  return data;
-}
-
-async function updateProfileLastActive(userId) {
-  await _sb.from('profiles').update({ last_active: new Date().toISOString() }).eq('id', userId);
-}
-
-/* ─── Reports ─── */
-async function createReport({ imageUrl, description, location, lat, lng, userId }) {
-  // 1. Insert report (DB trigger auto-creates mission)
-  const { data, error } = await _sb.from('reports')
-    .insert({
-      user_id: userId || null,
-      image_url: imageUrl,
-      description: (description || '').trim() || null,
-      location: location.trim(),
-      lat: lat || null,
-      lng: lng || null,
-      status: 'open'
-    })
-    .select('id, image_url, location, description, created_at, user_id')
-    .single();
-  if (error) {
-    console.error("Supabase insert error:", error);
-    throw new Error("Couldn't submit your report. Please try again.");
-  }
-
-  // 3. Award 50 pts for reporting + increment reports_submitted counter
-  if (userId) {
-    await _sb.rpc('award_points', { p_user_id: userId, p_amount: 50, p_reason: 'report_submitted' });
-    const { data: prof } = await _sb.from('profiles').select('reports_submitted').eq('id', userId).single();
-    if (prof) {
-      await _sb.from('profiles')
-        .update({ reports_submitted: (prof.reports_submitted || 0) + 1 })
-        .eq('id', userId);
-    }
-  }
-
-  return data;
-}
-
-/* ─── Missions ─── */
-async function getMissions(statusFilter) {
-  let q = _sb.from('missions')
-    .select(`
-      id, status, verification_status, created_at, points_reward, accepted_by, before_image, after_image,
-      report:reports(id, image_url, location, description, created_at,
-        reporter:profiles(id, username, display_name)),
-      acceptor:profiles(id, username, display_name)
-    `)
-    .order('created_at', { ascending: false })
-    .limit(50);
-
-  // Map UI filter names to DB values
-  const dbStatus = { 'in-progress': 'in_progress', 'approved': 'approved', 'open': 'open', 'rejected': 'rejected', 'pending': 'pending' };
-  if (statusFilter && statusFilter !== 'all') {
-    q = q.eq('status', dbStatus[statusFilter] || statusFilter);
-  }
-  const { data, error } = await q;
-  if (error) throw new Error('Failed to fetch missions.');
-  return (data || []).map(_normalizeMission);
-}
-
-async function getMissionById(missionId) {
-  const { data, error } = await _sb.from('missions')
-    .select(`
-      id, status, verification_status, created_at, points_reward, accepted_by, before_image, after_image,
-      report:reports(id, image_url, location, description, created_at,
-        reporter:profiles(id, username, display_name)),
-      acceptor:profiles(id, username, display_name)
-    `)
-    .eq('id', missionId).single();
-  if (error) throw new Error('Mission not found.');
-  return _normalizeMission(data);
-}
-
-/* Map Supabase shape → existing app shape (m.st, m.rpt, m.ab, m.at, m.creator) */
-function _normalizeMission(m) {
-  if (!m) return null;
+function normalizeDemoMission(mission) {
   const statusMap = { in_progress: 'in-progress' };
   return {
-    id: m.id,
-    st: m.verification_status === 'manual_review' ? 'manual_review' : (statusMap[m.status] || m.status),
-    ab: m.accepted_by,
-    at: m.created_at,
-    ct: m.completed_at || null,
-    points_reward: m.points_reward || 150,
-    after_img: m.after_image || null,          // proof photo URL
-    rejection_reason: m.rejection_reason || null, // rejection reason text
-    rpt: m.report ? {
-      id: m.report.id,
-      img: m.report.image_url,
-      loc: m.report.location,
-      desc: m.report.description,
-      by: m.report.reporter?.id,
-      dist: null
-    } : {},
-    creator: m.report?.reporter || {},
-    acceptor: m.acceptor || null
+    id: mission.id, st: statusMap[mission.status] || mission.status, ab: mission.accepted_by,
+    at: mission.created_at, ct: mission.completed_at, points_reward: mission.points_reward,
+    after_img: mission.after_image, rejection_reason: mission.rejection_reason || null,
+    rpt: { id: mission.report.id, img: mission.report.image_url, loc: mission.report.location,
+      desc: mission.report.description, by: mission.report.user_id, dist: null },
+    creator: mission.report.reporter || {}, acceptor: mission.acceptor || null
   };
 }
 
-async function acceptMission(missionId, userId) {
-  // Check it's still open
-  const { data: current } = await _sb.from('missions')
-    .select('status').eq('id', missionId).single();
-  if (!current || current.status !== 'open') throw new Error('already_accepted');
+async function validateBeforeImage() {
+  return { has_garbage: true, confidence: 1, skipped: true, reason: 'Demo mode' };
+}
 
-  const { data, error } = await _sb.from('missions')
-    .update({ status: 'in_progress', accepted_by: userId, accepted_at: new Date().toISOString() })
-    .eq('id', missionId).eq('status', 'open')
-    .select().single();
-  if (error || !data) throw new Error('already_accepted');
-  return _normalizeMission(data);
+function _friendlyError(err, fallback) { return fallback || err?.message || 'Something went wrong.'; }
+
+async function fileAsDataUrl(file) {
+  if (!file) return DEMO_IMAGE;
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read the image.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadImage(file) {
+  return fileAsDataUrl(file);
+}
+
+async function getOrCreateProfile(username) {
+  const existing = demoState.users.find(user => user.username.toLowerCase() === username.toLowerCase());
+  if (existing) return existing;
+  const profile = {
+    id: demoId('user'), username, display_name: username, points: 0, level: 1,
+    streak: 1, missions_completed: 0, reports_submitted: 0
+  };
+  demoState.users.push(profile);
+  return profile;
+}
+
+async function getProfile(userId) {
+  const profile = demoUser(userId);
+  if (!profile) throw new Error('Demo profile not found.');
+  return {
+    ...profile,
+    missions: demoState.missions
+      .filter(mission => mission.accepted_by === userId)
+      .map(mission => ({ id: mission.id, status: mission.status, created_at: mission.created_at, report: mission.report }))
+  };
+}
+
+async function updateProfileLastActive() {}
+
+async function createReport({ imageUrl, description, location, lat, lng, userId }) {
+  const user = demoUser(userId);
+  if (!user) throw new Error('Please enter your name again.');
+  const reportId = demoId('report');
+  const mission = {
+    id: demoId('mission'), report_id: reportId, status: 'open', verification_status: null,
+    created_at: new Date().toISOString(), completed_at: null, points_reward: 150,
+    accepted_by: null, before_image: imageUrl || DEMO_IMAGE, after_image: null,
+    report: { id: reportId, image_url: imageUrl || DEMO_IMAGE, location: location.trim(),
+      description: (description || '').trim(), lat: lat || null, lng: lng || null,
+      user_id: userId, reporter: user }
+  };
+  demoState.missions.unshift(mission);
+  user.reports_submitted = (user.reports_submitted || 0) + 1;
+  user.points = (user.points || 0) + 50;
+  return { id: reportId, image_url: mission.report.image_url, location: mission.report.location };
+}
+
+async function getMissions(statusFilter) {
+  const filter = statusFilter === 'in-progress' ? 'in_progress' : statusFilter;
+  return demoState.missions
+    .filter(mission => !filter || filter === 'all' || mission.status === filter)
+    .map(normalizeDemoMission);
+}
+
+async function getMissionById(missionId) {
+  const mission = demoState.missions.find(item => item.id === missionId);
+  if (!mission) throw new Error('Mission not found.');
+  return normalizeDemoMission(mission);
+}
+
+async function acceptMission(missionId, userId) {
+  const mission = demoState.missions.find(item => item.id === missionId);
+  if (!mission || mission.status !== 'open') throw new Error('already_accepted');
+  mission.status = 'in_progress';
+  mission.accepted_by = userId;
+  mission.acceptor = demoUser(userId);
+  return normalizeDemoMission(mission);
 }
 
 async function submitProof(missionId, afterImageFile, userId) {
-  // ── Guard: verify mission is still in_progress and owned by user ──
-  const { data: mission, error: fetchError } = await _sb
-    .from('missions')
-    .select('id, status, accepted_by, report_id, points_reward, before_image')
-    .eq('id', missionId)
-    .single();
-
-  if (fetchError || !mission) throw new Error('Mission not found. It may have been removed.');
-  if (mission.status !== 'in_progress' && mission.status !== 'in-progress')
-    throw new Error(`This mission is already ${mission.status}. Cannot resubmit.`);
+  const mission = demoState.missions.find(item => item.id === missionId);
+  if (!mission || mission.status !== 'in_progress') throw new Error('This mission is not available for proof.');
   if (mission.accepted_by !== userId) throw new Error('You can only submit proof for missions you accepted.');
-
-  // ── Upload proof with retry ───────────────────────────
-  const afterImageUrl = await _uploadProofWithRetry(afterImageFile);
-
-  // ── Update mission → pending (optimistic lock) ────────
-  const { data: updated, error: updateError } = await _sb
-    .from('missions')
-    .update({ after_image: afterImageUrl, status: 'pending', completed_at: new Date().toISOString() })
-    .eq('id', missionId)
-    .eq('status', 'in_progress')
-    .eq('accepted_by', userId)
-    .select('id, report_id, points_reward, after_image, before_image')
-    .single();
-
-  if (updateError || !updated) throw new Error('Could not update mission status. Please try again.');
-
-  // ── Get before image URL ──────────────────────────────
-  let beforeImageUrl = updated.before_image || mission.before_image;
-  if (!beforeImageUrl) {
-    const { data: report } = await _sb.from('reports')
-      .select('image_url').eq('id', updated.report_id).single();
-    beforeImageUrl = report?.image_url;
-  }
-
-  // ── Fire verification non-blocking (realtime picks up result) ──
-  if (beforeImageUrl) {
-    _callVerificationAPI({
-      missionId,
-      beforeImageUrl,
-      afterImageUrl
-    }).catch(err => console.warn('Verification call failed (non-critical):', err.message));
-  } else {
-    // No before image — run fallback simulation
-    _runVerificationFallback(updated, userId).catch(() => {});
-  }
-
-  return { ok: null, status: 'pending', pts: 0 }; // UI enters "verifying" state
+  mission.after_image = await fileAsDataUrl(afterImageFile);
+  mission.status = 'approved';
+  mission.verification_status = 'approved';
+  mission.completed_at = new Date().toISOString();
+  const user = demoUser(userId);
+  user.missions_completed = (user.missions_completed || 0) + 1;
+  user.points = (user.points || 0) + mission.points_reward;
+  return { ok: true, status: 'approved', pts: mission.points_reward };
 }
 
-async function _callVerificationAPI({ missionId, beforeImageUrl, afterImageUrl }) {
-  const username = window.S?.user?.username;
-  const res = await fetch('/api/verify-cleanup', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      mission_id: missionId,
-      before_image_url: beforeImageUrl,
-      after_image_url: afterImageUrl
-    })
-  });
-
-  let data;
-  try { data = await res.json(); } catch {
-    throw new Error('Verification service returned an unreadable response.');
-  }
-
-  // If approved, also tag the report with completed_by (client has username context)
-  if (data.verdict === 'approved' && username) {
-    await _sb.from('reports').update({ completed_by: username })
-      .eq('id', window.S?.missions?.find?.(m => m.id === missionId)?.report_id || '')
-      .catch(() => {});
-  }
-
-  return data;
-}
-
-// Fallback used only when no before image URL is available
-async function _runVerificationFallback(mission, userId) {
-  await new Promise(r => setTimeout(r, 1200));
-  const approved = Math.random() < 0.80;
-  const now = new Date().toISOString();
-  const currentUsername = window.S?.user?.username || 'Unknown';
-
-  if (approved) {
-    await _sb.from('missions').update({ status: 'approved', reviewed_at: now }).eq('id', mission.id);
-    await _sb.from('reports').update({ status: 'completed', completed_by: currentUsername })
-      .eq('id', mission.report_id).catch(() => {});
-  } else {
-    const reasons = [
-      'The after photo appears to show the same garbage. Please clean the area fully.',
-      'Image quality is too low to verify the cleanup.',
-      'The cleanup area is only partially cleared. Please complete the job.',
-    ];
-    const reason = reasons[Math.floor(Math.random() * reasons.length)];
-    await _sb.from('missions').update({ status: 'rejected', rejection_reason: reason, reviewed_at: now }).eq('id', mission.id);
-  }
-}
-
-async function _uploadProofWithRetry(file, maxRetries = 1) {
-  const ALLOWED = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-  if (!ALLOWED.includes(file.type.toLowerCase())) throw new Error('Only JPG, PNG, or WebP images are allowed.');
-  if (file.size > 10 * 1024 * 1024) throw new Error(`Image must be under 10MB. Your file is ${(file.size / 1024 / 1024).toFixed(1)}MB.`);
-
-  let lastError;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const timestamp = Date.now(), random = Math.random().toString(36).slice(2, 9);
-      const ext = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg';
-      const filePath = `proof-${timestamp}-${random}.${ext}`;
-      const { error } = await _sb.storage.from('proof-images').upload(filePath, file, {
-        cacheControl: '3600', upsert: false, contentType: file.type
-      });
-      if (error) {
-        if (error.message.includes('size') || error.message.includes('exceeded')) throw new Error('Image is too large. Please use a photo under 10MB.');
-        if (error.message.includes('mime') || error.message.includes('type')) throw new Error('File type not allowed. Use JPG, PNG, or WebP.');
-        throw new Error("Couldn't upload your proof photo. Please try again.");
-      }
-      const { data } = _sb.storage.from('proof-images').getPublicUrl(filePath);
-      if (!data?.publicUrl) throw new Error('Could not retrieve the uploaded image URL.');
-      return data.publicUrl;
-    } catch (err) {
-      lastError = err;
-      const retryable = err.message.includes('connection') || err.message.includes('network') || err.message.includes('timeout');
-      if (!retryable || attempt === maxRetries) break;
-      await new Promise(r => setTimeout(r, 1500));
-    }
-  }
-  throw lastError;
-}
-
-
-/* ─── Leaderboard ─── */
 async function getLeaderboard() {
-  // Fetch top 50 users from profiles sorted by points descending
-  const { data, error } = await _sb.from('profiles')
-    .select('username, points')
-    .order('points', { ascending: false })
-    .limit(50);
-    
-  if (error) throw new Error('Leaderboard unavailable.');
-  
-  return data || [];
+  return [...demoState.users].sort((a, b) => b.points - a.points)
+    .map(user => ({ username: user.username, points: user.points }));
 }
 
 async function deleteMission(missionId, userId) {
-  // 1. Get mission to find report_id and verify ownership
-  const { data: mission, error: fErr } = await _sb.from('missions')
-    .select('id, report_id, report:reports(user_id)')
-    .eq('id', missionId).single();
-
-  if (fErr || !mission) throw new Error('Mission not found.');
-
-  // Verify ownership
-  if (mission.report?.user_id !== userId) {
-    throw new Error('Unauthorized: Only the uploader can delete this quest.');
-  }
-
-  // 2. Delete the mission FIRST (removes the FK reference to the report)
-  const { error: mErr } = await _sb.from('missions').delete().eq('id', missionId);
-  if (mErr) throw new Error("Couldn't delete quest: " + mErr.message);
-
-  // 3. Now delete the report (no longer referenced by any mission)
-  const { error: dErr } = await _sb.from('reports').delete().eq('id', mission.report_id);
-  if (dErr) throw new Error("Couldn't delete report: " + dErr.message);
+  const index = demoState.missions.findIndex(item => item.id === missionId);
+  const mission = demoState.missions[index];
+  if (!mission) throw new Error('Mission not found.');
+  if (mission.report.user_id !== userId) throw new Error('Unauthorized: Only the uploader can delete this quest.');
+  demoState.missions.splice(index, 1);
 }
 
-/* ─── Realtime subscriptions ─── */
-let _channels = {};
-
-function subscribeReports(onInsert) {
-  const ch = _sb.channel('reports-feed')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'reports' }, onInsert)
-    .subscribe();
-  _channels['reports-feed'] = ch;
-  return ch;
-}
-
-function subscribeMission(missionId, onChange) {
-  const key = 'mission-' + missionId;
-  const ch = _sb.channel(key)
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'missions', filter: 'id=eq.' + missionId }, onChange)
-    .subscribe();
-  _channels[key] = ch;
-  return ch;
-}
-
-function subscribeLeaderboard(onChange) {
-  const ch = _sb.channel('leaderboard-live')
-    .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'profiles' }, onChange)
-    .subscribe();
-  _channels['leaderboard-live'] = ch;
-  return ch;
-}
-
-function unsubscribe(channelOrKey) {
-  if (!channelOrKey) return;
-  if (typeof channelOrKey === 'string') {
-    const ch = _channels[channelOrKey];
-    if (ch) { _sb.removeChannel(ch); delete _channels[channelOrKey]; }
-  } else {
-    _sb.removeChannel(channelOrKey);
-  }
-}
-
-function unsubscribeAll() {
-  Object.values(_channels).forEach(ch => _sb.removeChannel(ch));
-  _channels = {};
+const _demoSubscriptions = new Map();
+function subscribeReports(onInsert) { return { type: 'demo-reports', onInsert }; }
+function subscribeMission(missionId, onChange) { const channel = { type: 'demo-mission', missionId, onChange }; _demoSubscriptions.set(missionId, channel); return channel; }
+function subscribeLeaderboard(onChange) { return { type: 'demo-leaderboard', onChange }; }
+function unsubscribe(channel) {
+  if (channel?.missionId) _demoSubscriptions.delete(channel.missionId);
 }

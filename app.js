@@ -15,23 +15,14 @@ function acCol() { return 'rgba(124,255,59,0.15)' }
 /* ─── State ─── */
 const S = { user: null, screen: 'auth', prev: null, detailId: null };
 
-/* ─── Session (Supabase profile id + username in localStorage) ─── */
+/* ─── Session (in-memory demo session) ─── */
 function getSession() {
-  return {
-    userId: localStorage.getItem('sweepx_user_id'),
-    username: localStorage.getItem('sweepx_username')
-  };
+  return { userId: null, username: null };
 }
 function saveSession(profile) {
-  localStorage.setItem('sweepx_user_id', profile.id);
-  localStorage.setItem('sweepx_username', profile.username);
   S.user = profile;
 }
 function clearSession() {
-  localStorage.removeItem('sweepx_user_id');
-  localStorage.removeItem('sweepx_username');
-  // also clear old-format keys
-  localStorage.removeItem('sx_s');
   S.user = null;
 }
 
@@ -540,10 +531,13 @@ async function _loadHome() {
 }
 
 async function _getReportsForMap() {
-  try {
-    const { data } = await _sb.from('reports').select('id, lat, lng, status, location').not('lat', 'is', null).not('lng', 'is', null);
-    return data || [];
-  } catch { return []; }
+  const missions = await getMissions();
+  return missions
+    .filter(mission => mission.rpt?.lat != null && mission.rpt?.lng != null)
+    .map(mission => ({
+      id: mission.rpt.id, lat: mission.rpt.lat, lng: mission.rpt.lng,
+      status: mission.st, location: mission.rpt.loc
+    }));
 }
 
 let _homeMap = null;
@@ -1442,20 +1436,7 @@ function doDelete(mId) {
    BOOT
 ═══════════════════════════════════════════ */
 async function boot() {
-  const { userId, username } = getSession();
-  if (userId && username) {
-    try {
-      const profile = await getProfile(userId);
-      S.user = profile;
-      go('home');
-    } catch (e) {
-      // Profile not found or Supabase error — fall back to auth
-      clearSession();
-      go('auth');
-    }
-  } else {
-    go('auth');
-  }
+  go('auth');
 }
 
 boot();
