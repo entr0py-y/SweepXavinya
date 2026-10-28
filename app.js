@@ -349,7 +349,7 @@ async function doEnter() {
 function renderHome() {
   const u = S.user || {}, s = document.getElementById('s-home');
   s.innerHTML = `
-<div class="hdr"><div class="hdr-l"><div class="avatar" style="width:40px;height:40px;font-size:14px">${ini(u.username)}</div><div class="hdr-g"><span>Hello!</span><span>${u.username || ''}</span></div></div><div class="hdr-r"><div class="icon-btn">${I.help}</div><div class="icon-btn" style="position:relative">${I.bell}<span class="notif-dot"></span></div></div></div>
+<div class="hdr"><div class="hdr-l"><div class="avatar" style="width:40px;height:40px;font-size:14px">${ini(u.username)}</div><div class="hdr-g"><span>Hello!</span><span>${u.username || ''}</span></div></div><div class="hdr-r"><button class="icon-btn" onclick="openSweepXChat()" aria-label="Open SweepX Agent" title="Ask SweepX Agent">${I.help}</button><div class="icon-btn" style="position:relative">${I.bell}<span class="notif-dot"></span></div></div></div>
 <div class="loc-bar" id="home-loc-bar"><span class="loc-bar-icon">${I.pin}</span><span class="loc-bar-text" id="home-loc-text">Locating…</span></div>
 <div class="sg">
 <div class="sc"><div class="sc-top"><div class="sc-ico">${I.pin}</div><div class="sc-arr">${I.arr}</div></div><div class="sc-bot"><div class="sc-lbl">Reports</div><div class="sc-val" id="sc-reports">–</div></div></div>
@@ -386,6 +386,86 @@ function renderHome() {
   // Async load
   _loadHome();
   _fillLocation();
+}
+
+function escapeChatHtml(value) {
+  return String(value).replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+  }[character]));
+}
+
+let _chatHistory = [];
+function openSweepXChat() {
+  let modal = document.getElementById('sweepx-chat');
+  if (modal) { modal.classList.add('is-open'); document.getElementById('sweepx-chat-input')?.focus(); return; }
+  modal = document.createElement('div');
+  modal.id = 'sweepx-chat';
+  modal.className = 'chat-modal is-open';
+  modal.innerHTML = `
+    <div class="chat-panel" role="dialog" aria-modal="true" aria-labelledby="sweepx-chat-title">
+      <div class="chat-head"><div><div class="chat-kicker">SWEEPX AGENT</div><div id="sweepx-chat-title" class="chat-title">How can I help?</div></div>
+        <button class="chat-close" onclick="closeSweepXChat()" aria-label="Close chat">×</button></div>
+      <div class="chat-messages" id="sweepx-chat-messages">
+        <div class="chat-bubble chat-agent">Hi! I can help with missions, reports, cleanup safety, and using SweepX.</div>
+      </div>
+      <form class="chat-form" onsubmit="sendSweepXChat(event)">
+        <input id="sweepx-chat-input" maxlength="2000" autocomplete="off" placeholder="Ask the SweepX Agent…" aria-label="Message" />
+        <button id="sweepx-chat-send" type="submit" aria-label="Send message">↑</button>
+      </form>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', event => { if (event.target === modal) closeSweepXChat(); });
+  document.getElementById('sweepx-chat-input').focus();
+}
+
+function closeSweepXChat() {
+  const modal = document.getElementById('sweepx-chat');
+  if (modal) modal.classList.remove('is-open');
+}
+
+function appendChatMessage(role, content) {
+  const messages = document.getElementById('sweepx-chat-messages');
+  if (!messages) return;
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble ${role === 'user' ? 'chat-user' : 'chat-agent'}`;
+  bubble.innerHTML = escapeChatHtml(content).replace(/\n/g, '<br>');
+  messages.appendChild(bubble);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function sendSweepXChat(event) {
+  event.preventDefault();
+  const input = document.getElementById('sweepx-chat-input');
+  const button = document.getElementById('sweepx-chat-send');
+  const message = input?.value.trim();
+  if (!message || !button) return;
+  input.value = '';
+  appendChatMessage('user', message);
+  _chatHistory.push({ role: 'user', content: message });
+  button.disabled = true;
+  button.textContent = '…';
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        userId: S.user?.id,
+        username: S.user?.username,
+        history: _chatHistory
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'The agent is unavailable.');
+    appendChatMessage('assistant', data.reply);
+    _chatHistory.push({ role: 'assistant', content: data.reply });
+  } catch (error) {
+    appendChatMessage('assistant', `Sorry, I couldn't connect right now. ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = '↑';
+    input.focus();
+  }
 }
 
 function _fillLocation() {
